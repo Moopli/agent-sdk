@@ -45,6 +45,7 @@ import (
 	arieshttp "github.com/hyperledger/aries-framework-go/pkg/didcomm/transport/http"
 	"github.com/hyperledger/aries-framework-go/pkg/didcomm/transport/ws"
 	"github.com/hyperledger/aries-framework-go/pkg/doc/jose"
+	"github.com/hyperledger/aries-framework-go/pkg/doc/jose/jwk"
 	"github.com/hyperledger/aries-framework-go/pkg/doc/ld"
 	"github.com/hyperledger/aries-framework-go/pkg/doc/ldcontext/remote"
 	"github.com/hyperledger/aries-framework-go/pkg/framework/aries"
@@ -152,6 +153,7 @@ type agentStartOpts struct {
 	KeyAgreementType         string      `json:"key-agreement-type"`
 	MediaTypeProfiles        []string    `json:"media-type-profiles"`
 	WebSocketReadLimit       int64       `json:"web-socket-read-limit"`
+	GNAPPrivJWKRaw           string      `json:"gnap-priv-jwk-raw"`
 }
 
 type userConfig struct {
@@ -768,6 +770,17 @@ func createEDVStorage(opts *agentStartOpts, indexedDBProvider *indexeddb.Provide
 
 func createKMSAndCrypto(opts *agentStartOpts, indexedDBKMSProvider storage.Provider,
 	allAriesOptions []aries.Option) (kms.KeyManager, cryptoapi.Crypto, []aries.Option, error) {
+	gnapJWK := &jwk.JWK{}
+
+	if len(opts.GNAPPrivJWKRaw) > 0 {
+		err := json.Unmarshal([]byte(opts.GNAPPrivJWKRaw), gnapJWK)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to unmarshal gnap JWK: %w", err)
+		}
+	} else {
+		return nil, nil, nil, fmt.Errorf("AAAAAAAA")
+	}
+
 	if opts.KMSType == kmsTypeWebKMS {
 		return createWebkms(opts, allAriesOptions)
 	}
@@ -777,6 +790,17 @@ func createKMSAndCrypto(opts *agentStartOpts, indexedDBKMSProvider storage.Provi
 
 func createWebkms(opts *agentStartOpts,
 	allAriesOptions []aries.Option) (*webkms.RemoteKMS, *webcrypto.RemoteCrypto, []aries.Option, error) {
+	gnapJWK := &jwk.JWK{}
+
+	if len(opts.GNAPPrivJWKRaw) > 0 {
+		err := json.Unmarshal([]byte(opts.GNAPPrivJWKRaw), gnapJWK)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to unmarshal gnap JWK: %w", err)
+		}
+	} else {
+		return nil, nil, nil, fmt.Errorf("AAAAAAAA")
+	}
+
 	zcapSVC := zcapld.New(opts.AuthzKeyStoreURL, opts.UserConfig.AccessToken, opts.UserConfig.SecretShare)
 
 	httpClient := &http.Client{}
