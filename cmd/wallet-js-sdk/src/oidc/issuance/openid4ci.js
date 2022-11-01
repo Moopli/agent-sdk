@@ -1,212 +1,287 @@
 /*
 Copyright SecureKey Technologies Inc. All Rights Reserved.
+Copyright Avast Software. All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
 */
 
+import axios from "axios";
+import { encode, decode } from "js-base64";
+
 /**
- * PrepareIssuanceRequest fetches the issuer metadata and prepares an issuance transaction,
- * returning to the caller for an opportunity to consent.
+ * OpenID4CI module provides APIs for wallets to receive verifiable credentials through OIDC for Credential Issuance.
  *
- * @param {string} issuer_uri - uri of issuer server: TODO decide if this is specifically the metadata endpoint.
- * @param {Object} options
- * @param {string} options.op_state - (optional) op_state parameter for issuer-initiated transactions.
+ * @module OpenID4CI
  *
- * @returns {Promise<Object>} - If successful, returns the issuer metadata and a continuation handler function.
- *   Issuer metadata may be used to display a UI showing the fields the issuer will include in each potential credential,
- *   for user selection/consent. Call the continuation function if wallet user consents to request a credential.
  */
-export async function PrepareIssuanceRequest(
-  issuer_uri = '',
-  {
-    op_state = '',
-  }
+
+/**
+ * authorize is used by a wallet to authorize an issuer's OIDC verifiable-credential Issuance Request.
+ *
+ * @param{Object} req - the Issuance Request from an OIDC Issuer that the wallet intends to authorize.
+ * @param{string} user_pin - Optional. A 2FA PIN provided by the Issuer to the wallet through a separate channel
+ * from the request, for pre-authorized issuance flows.
+ * @param{Object} client_config -
+ * @param{string} client_config.wallet_callback_uri - wallet-hosted URI for callback redirect from issuer, after user authorizes issuer.
+ * @param{string} client_config.user_did - the DID of the wallet user. The requested credential will be bound to this DID.
+ * @param{string} client_config.client_id - the wallet app instance's OIDC client ID.
+ * @param{function} jwt_signer
+ *
+ */
+export async function authorize(
+  req,
+  user_pin = '',
+  client_config,
+  jwt_signer = async function(iss, aud, iat, c_nonce){return ''},
 ) {
-  // stub
-  const fetchIssuerMetadata = async function (uri) {
-    // data returned by issuer server
-    return {
-      issuer: uri,
-      authorization_endpoint: uri + '/auth',
-      token_endpoint: uri + '/token',
-      pushed_authorization_request_endpoint: uri + '/par',
-      require_pushed_authorization_requests: true,
-    };
-  };
+  const {issuer, credential_type, user_pin_required, op_state} = req;
+  const pre_auth_code = req['pre-authorized_code'];
 
-  // TODO: Will issuer metadata be at a .well-known location, or should we expect the issuer_uri parameter to be the
-  //  complete uri for the metadata endpoint
-  const issuerMetadata = await fetchIssuerMetadata(issuer_uri);
+  if (pre_auth_code !== '' && pre_auth_code !== undefined) {
+    if (user_pin_required === true && user_pin === '') {
+      throw new Error("Issuance Request indicates a user PIN is required, but no user PIN was provided.");
+    }
 
-  const state = '';
-
-  const requestIssuanceHandler = async function (
-    wallet_callback_uri = '',
-    {
-      credential_type = '', // TODO: should we support requesting multiple credentials at once?
-      credential_scope = '',
-    },
-    save_transaction = async function(txn_id='', data={}){},
-    ) {
-    return await requestIssuance(
-      wallet_callback_uri,
-      state,
-      {
-        credential_type,
-        credential_scope,
-        op_state,
-      },
-      issuerMetadata,
-      save_transaction,
-    );
+    return await preauthorized(issuer, credential_type, pre_auth_code, user_pin, client_config, jwt_signer)
   }
 
-  return {issuer: issuerMetadata, accept: requestIssuanceHandler};
+  return await request_issuance(issuer, credential_type, op_state, client_config);
 }
 
-async function requestIssuance(
-    wallet_callback_uri = '',
-    oauth_state = '',
-  {
-    credential_type = '', // TODO: should we support requesting multiple credentials at once?
-    credential_scope = '',
-    op_state = '',
-  },
-  issuer_metadata = {},
-  save_transaction = async function(txn_id='', data={}){},
+/**
+ * request_issuance begins performs a pushed authorization request to the issuer, and returns a redirect URI and client state.
+ *
+ * @param {string} issuer_uri - uri of issuer server.
+ * @param {string} credential_type - type of credential to request, as found in the Issuance Request.
+ * @param {string} op_state - (optional) op_state parameter for issuer-initiated transactions.
+ * @param {object} client_config - client configuration.
+ * @param {string} client_config.wallet_callback_uri - wallet-hosted URI for callback redirect from issuer, after user authorizes issuer.
+ // * @param {string} client_config.user_did - the DID of the wallet user. The requested credential will be bound to this DID.
+ * @param {string} client_config.client_id - the wallet app instance's OIDC client ID.
+ *
+ *
+ * @returns {Object} - If successful, returns the redirect URI for redirecting to the Issuer for user consent,
+ * and a client state string to be saved and provided to the followup wallet callback.
+ */
+async function request_issuance(
+  issuer_uri ,
+  credential_type ,
+  op_state = '',
+  client_config ,
 ) {
-  // stub
-  const pushAuthRequest = async function (url, req) {
-    // data returned by issuer server
-    return {request_uri: '', expires_in: 60};
-  }
+  const issuer_metadata = await get_issuer_metadata(issuer_uri);
 
-  // TODO create new client for each transaction, or use a caller-provided client ID?
-  const client_id = '';
+  const oauth_state = generate_nonce();
 
-  const authRequest = {
-    scope: credential_scope,
-    response_type: 'code',
-    client_id,
-    redirect_uri: wallet_callback_uri,
-    state: oauth_state,
-    op_state: op_state,
-    authorization_details: [
-      {
-        type: 'openid_credential',
-        credential_type: credential_type,
-      }
-    ]
-  };
+  const authRequest = new URLSearchParams();
+  authRequest.append('response_type', 'code');
+  authRequest.append('client_id', client_config.client_id);
+  authRequest.append('redirect_uri', client_config.wallet_callback_uri);
+  authRequest.append('state', oauth_state);
+  authRequest.append('op_state', op_state);
+  authRequest.append('authorization_details', JSON.stringify([
+    {
+      type: 'openid_credential',
+      credential_type: credential_type,
+    }
+  ]));
 
-  const pushedAuthResponse = await pushAuthRequest(issuer_metadata.pushed_authorization_request_endpoint, authRequest);
+  const {request_uri, expires_in} = await axios.post(
+    issuer_metadata.pushed_authorization_request_endpoint,
+    authRequest,
+  ).then((resp) => resp.data);
 
-  // TODO query-encode
-  const redirect_to_issuer = issuer_metadata.authorization_endpoint + '?request_uri=' + pushedAuthResponse.request_uri +
-    '&client_id=' + client_id;
+  const redirect_to_issuer = new URL(issuer_metadata.authorization_endpoint);
+  redirect_to_issuer.searchParams.append('request_uri', request_uri);
+  redirect_to_issuer.searchParams.append('client_id', client_config.client_id);
 
   const transaction_data = {
     credential_type,
-    client_id,
+    client_id: client_config.client_id,
     issuer_metadata,
+    oauth_state,
   };
 
-  await save_transaction(oauth_state, transaction_data);
-
-  return {redirect: redirect_to_issuer, state: oauth_state};
+  return {redirect: redirect_to_issuer.href, client_state: marshal_transaction(transaction_data)};
 }
 
 /**
- * CompleteIssuance is the OIDC issuance callback, used when the issuer has returned to the wallet, and the wallet user
+ * callback is the OIDC issuance callback, used when the issuer has returned to the wallet, and the wallet user
  * has consented to have the credential created.
  *
- * @param {string} oidc_state - the state parameter of this OIDC transaction.
- * @param {string} user_did - the DID of the wallet that is receiving this credential.
- * @param {Object} options
+ * @param {string} callback_uri
+ * @param {string} client_state
+ * @param {Object} client_config
+ * @param {string} client_config.user_did - the DID of the wallet user to whom the credential is being issued.
+ * @param {string} client_config.wallet_callback_uri - wallet-hosted URI for callback redirect from issuer, after user authorizes issuer.
+ * @param {string} client_config.client_id - the wallet app instance's OIDC client ID. * @param {Object} client_state
  * @param {function} jwt_signer - a handler for signing a JWT for proving possession of user_did.
  *    When this creates a JWT, it should add kid, jwk, or x5c field corresponding to a key bound to user_did.
- * @param {function} load_transaction - a handler for loading an OIDC issuance transaction under the given transaction ID.
- *    Used for loading transaction state saved by requestIssuance.
- * @param {function} delete_transaction - a handler for deleting an OIDC issuance transaction under the given transaction ID.
  */
-export async function CompleteIssuance(
-  oidc_state = '',
-  user_did = '',
-  {
-    authorization_code = '',
-    pre_authorized_code = '',
-    user_pin = '',
-  },
-  jwt_signer = async function(iss, aud, iat, c_nonce){return {}},
-  // TODO: should these handlers be parameterless instead, as caller-provided closures on the txn ID?
-  //  then the caller doesn't need to trust that this API will only touch the relevant transaction.
-  load_transaction = async function(txn_id= ''){return {}},
-  delete_transaction = async function(txn_id = ''){},
+export async function callback(
+  callback_uri,
+  client_state,
+  client_config,
+  jwt_signer = async function(iss, aud, iat, c_nonce){return ''},
 ) {
+  const parsedURI = new URL(callback_uri);
 
-  const transaction_data = await load_transaction(oidc_state);
+  const authorization_code = parsedURI.searchParams.get('code');
+  const oauth_state = parsedURI.searchParams.get('state');
 
-  // stub
-  const exchangeAuthCode = async function(auth_code, token_endpoint) {
-    // data returned by issuer server
-    return {
-      access_token: '',
-      token_type: '',
-      c_nonce: '',
-    };
-  };
+  if (authorization_code === '') {
+    throw new Error('Callback URI is missing authorization `code` as a query parameter.');
+  }
 
-  // stub
-  const exchangePreAuthCode = async function(pre_auth_code, user_pin, token_endpoint) {
-    // data returned by issuer server
-    return {
-      access_token: '',
-      token_type: '',
-      c_nonce: '',
+  if (oauth_state === '') {
+    throw new Error('Issuer did not include state parameter in callback URI when returning user to wallet.')
+  }
+
+  if (client_state === '') {
+    throw new Error('Cannot complete authorization flow, `callback` must be provided with client_state string returned by ' +
+      'previous `authorize` call.')
+  }
+
+  const transaction_data = parse_transaction(client_state);
+
+  if (transaction_data.oauth_state !== oauth_state) {
+    throw new Error('Issuer provided a state parameter that does not match the state parameter of the client-side transaction. ' +
+      'This may be an error in the Issuer, or a mix-up of state data in a client performing multiple flows at the same time.')
+  }
+
+  const tokenRequest = new URLSearchParams();
+  tokenRequest.append('grant_type', 'authorization_code');
+  tokenRequest.append('code', authorization_code);
+  tokenRequest.append('redirect_uri', client_config.wallet_callback_uri);
+  tokenRequest.append('client_id', client_config.client_id);
+
+  /*
+  response format:
+  {
+    access_token: '',
+    token_type: '',
+    c_nonce: '',
+  }
+  */
+  const token_response = await axios.post(
+    transaction_data.issuer_metadata.token_endpoint,
+    tokenRequest,
+    ).then((resp) => resp.data).catch((e) => {
+    throw new Error('Error authorizing wallet with Issuer: failed to exchange auth code for token:', e);
+  });
+
+  return await get_credential(token_response, transaction_data, client_config, jwt_signer);
+}
+
+async function preauthorized(
+  issuer_uri,
+  credential_type,
+  pre_authorized_code,
+  user_pin,
+  client_config,
+  jwt_signer = async function(iss, aud, iat, c_nonce){return ''},
+) {
+  // no op_state for pre-auth flow
+  // no oauth state for pre-auth flow
+
+  const issuer_metadata = await get_issuer_metadata(issuer_uri);
+  let transaction_data = {
+    issuer_metadata,
+    credential_type,
+    client_id: client_config.client_id,
+  }
+
+  const tokenRequest = new URLSearchParams();
+  tokenRequest.append('grant_type', 'urn:ietf:params:oauth:grant-type:pre-authorized_code');
+  tokenRequest.append('pre-authorized_code', pre_authorized_code);
+  tokenRequest.append('user_pin', user_pin);
+
+  /*
+  * tokenResponse contents look like:
+  * {
+      access_token: 'foobar',
+      token_type: 'bearer',
+      c_nonce: 'sldkfyhsiudlfkgjh',
       authorization_pending: true,
-      interval: 1,
-    };
-  };
+      interval: 5,
+    }
+  * */
+  // TODO: POST as application/x-www-form-urlencoded not json
+  let token_response = await axios.post(
+    transaction_data.issuer_metadata.token_endpoint,
+    tokenRequest,
+  ).then((resp)=> resp.data);
+  // TODO: poll if response is deferred (if token_response.authorization_pending is true),
+  //  waiting token_response.interval seconds before next request (or 5 seconds if interval missing or less than 5).
 
-  let tokenResponse;
+  return await get_credential(token_response, transaction_data, client_config, jwt_signer);
+}
 
-  if (authorization_code !== '') {
-    tokenResponse = await exchangeAuthCode(authorization_code, transaction_data.issuer_metadata.token_endpoint);
-  } else if (pre_authorized_code !== '') {
-    tokenResponse = await exchangePreAuthCode(pre_authorized_code, user_pin, transaction_data.issuer_metadata.token_endpoint);
-    // TODO: poll for token if authorization is pending
-  }
+async function get_credential(
+  token_response,
+  transaction_data,
+  client_config = {
+    user_did: '',
+  },
+  jwt_signer = async function(iss, aud, iat, c_nonce){return ''},
+) {
+  const jwt = await jwt_signer(transaction_data.client_id, transaction_data.issuer_metadata.issuer, /*time now*/0, token_response.c_nonce)
 
-  // stub
-  const sendCredentialRequest = async function(req) {
-    // data returned by issuer server
-    return {
-      format: '',
-      credential: {},
-    };
-  }
-
-  const jwt = await jwt_signer(transaction_data.client_id, transaction_data.issuer_metadata.issuer, /*time now*/0, tokenResponse.c_nonce)
-
-  // TODO note: credential request seems to handle only one credential type at a time, while the original auth request can request multiple credentials.
-  //  should we:
-  //   A) be able to request multiple credentials in one call, or
-  //   B) make multiple requests, one for each requested credential, or
-  //   C) only request one credential at a time in a single issuance flow
   const credentialRequest = {
     type: transaction_data.credential_type,
-    format: '',
-    did: user_did,
+    // format: '', // TODO should we specify format, or allow issuer to always decide by default?
+    did: client_config.user_did,
     proof: {
       proof_type: 'jwt',
       jwt,
     },
   };
 
-  const credentialResponse = await sendCredentialRequest(credentialRequest)
-  // TODO poll for credential if response is deferred
-
-  await delete_transaction(oidc_state);
+  /*
+  Response format:
+  {
+    format: '',
+    credential: {},
+  }
+  */
+  const credentialResponse = await axios.post(transaction_data.issuer_metadata.credential_endpoint, credentialRequest, {
+    headers: {
+      Authorization: "Bearer " + token_response.access_token,
+    },
+  }).then((resp) => resp.data);
+  // TODO deferred flow implementation deferred
 
   return {format: credentialResponse.format, credential: credentialResponse.credential};
+}
+
+
+/*
+get_issuer_metadata returns issuer metadata from the .well-known/openid-configuration endpoint.
+{
+  issuer: uri,
+  authorization_endpoint: uri + '/auth',
+  token_endpoint: uri + '/token',
+  pushed_authorization_request_endpoint: uri + '/par',
+  require_pushed_authorization_requests: true,
+  credential_endpoint: uri + '/credentials',
+}
+*/
+async function get_issuer_metadata(issuer_uri) {
+  return await axios.get(issuer_uri + '/.well-known/openid-configuration')
+    .then((resp) => resp.data)
+    .catch((e) => {
+      throw new Error('Failed to fetch issuer server metadata:', e)
+    });
+}
+
+function parse_transaction(txn) {
+  return JSON.parse(decode(txn))
+}
+
+function marshal_transaction(txn) {
+  return encode(JSON.stringify(txn), true)
+}
+
+function generate_nonce() {
+  return crypto.randomUUID();
 }
