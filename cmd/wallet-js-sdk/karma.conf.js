@@ -13,7 +13,7 @@ module.exports = function (config) {
             {pattern: "public/agent-js-worker/assets/*", included: false},
             {pattern: "test/**/*.ini", included: true},
             {pattern: "test/testdata/*", included: true},
-            {pattern: "test/specs/**/*.spec.js", type: "module"},
+            {pattern: "test/specs/oidc/issuance/*.spec.js", type: "module"},
         ],
         preprocessors: {
             'test/specs/**/*.spec.js': ['webpack', 'sourcemap'],

@@ -69,9 +69,13 @@ async function request_issuance(
   op_state = '',
   client_config ,
 ) {
+  // throw new Error('test 0');
+
   const issuer_metadata = await get_issuer_metadata(issuer_uri);
 
   const oauth_state = generate_nonce();
+
+  throw new Error('test 1'); // I can't reach this error...
 
   const authRequest = new URLSearchParams();
   authRequest.append('response_type', 'code');
@@ -91,6 +95,8 @@ async function request_issuance(
     authRequest,
   ).then((resp) => resp.data);
 
+  throw new Error(request_uri);
+
   const redirect_to_issuer = new URL(issuer_metadata.authorization_endpoint);
   redirect_to_issuer.searchParams.append('request_uri', request_uri);
   redirect_to_issuer.searchParams.append('client_id', client_config.client_id);
@@ -102,6 +108,7 @@ async function request_issuance(
     oauth_state,
   };
 
+  throw new Error('debug');
   return {redirect: redirect_to_issuer.href, client_state: marshal_transaction(transaction_data)};
 }
 
